@@ -72,41 +72,59 @@ impl<C: Clock<TAI>> KalmanStorage<C> for StdKalmanStorage<C> {}
 
 /// Storage for the [`KalmanController`](crate::KalmanController) backed by fixed buffers.
 ///
-/// N should be larger than the square of twice the number of internal clocks plus the
-/// number of links, and larger than the number of external clocks.
+/// `MATRIX` must hold `(2 * internal clocks + links)^2` elements. The remaining
+/// capacities count internal clocks, external clocks, links, and selection bounds
+/// respectively. Selection needs two bounds per external link.
 ///
-/// Note: This type is not yet stable, we reserve the right to change it once calculating
-/// for const generics becomes a thing in the rust compiler. Until then, this is a bit
-/// wastefull for large N.
-pub struct NoAllocKalmanStorage<C, const N: usize>(PhantomData<[C; N]>);
+/// Capacities default to `MATRIX` for compatibility. Embedded users can size each
+/// buffer independently to avoid copying unused clock and link slots on the stack.
+pub struct NoAllocKalmanStorage<
+    C,
+    const MATRIX: usize,
+    const INTERNAL: usize = MATRIX,
+    const EXTERNAL: usize = MATRIX,
+    const LINKS: usize = MATRIX,
+    const BOUNDS: usize = MATRIX,
+>(PhantomData<C>);
 
-impl<C, const N: usize> Debug for NoAllocKalmanStorage<C, N> {
+impl<C, const M: usize, const I: usize, const E: usize, const L: usize, const B: usize> Debug
+    for NoAllocKalmanStorage<C, M, I, E, L, B>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("NoAllocKalmanStorage").finish()
     }
 }
 
-impl<C, const N: usize> Clone for NoAllocKalmanStorage<C, N> {
+impl<C, const M: usize, const I: usize, const E: usize, const L: usize, const B: usize> Clone
+    for NoAllocKalmanStorage<C, M, I, E, L, B>
+{
     fn clone(&self) -> Self {
         Self(PhantomData)
     }
 }
 
-impl<C, const N: usize> KalmanStorageBase for NoAllocKalmanStorage<C, N> {
-    type MatrixStorage = [f64; N];
-    type ExternalClockStorage = ArrayVec<ClockId, N>;
-    type InternalClockStorage = ArrayVec<crate::estimator::ClockInfo, N>;
-    type EstimatorLinkStorage = ArrayVec<crate::estimator::LinkInfo, N>;
-    type FilterLinkStorage = ArrayVec<crate::filter::LinkInfo, N>;
-    type BoundStorage = ArrayVec<(f64, crate::filter::BoundType), N>;
+impl<C, const M: usize, const I: usize, const E: usize, const L: usize, const B: usize>
+    KalmanStorageBase for NoAllocKalmanStorage<C, M, I, E, L, B>
+{
+    type MatrixStorage = [f64; M];
+    type ExternalClockStorage = ArrayVec<ClockId, E>;
+    type InternalClockStorage = ArrayVec<crate::estimator::ClockInfo, I>;
+    type EstimatorLinkStorage = ArrayVec<crate::estimator::LinkInfo, L>;
+    type FilterLinkStorage = ArrayVec<crate::filter::LinkInfo, L>;
+    type BoundStorage = ArrayVec<(f64, crate::filter::BoundType), B>;
 }
 
-impl<C: Clock<TAI>, const N: usize> KalmanStorageInternal<C> for NoAllocKalmanStorage<C, N> {
-    type SteeredClockStorage = ArrayVec<crate::ClockInfo<C>, N>;
-    type StateMutex = RefCell<KalmanControllerState<NoAllocKalmanStorage<C, N>, C>>;
+impl<C: Clock<TAI>, const M: usize, const I: usize, const E: usize, const L: usize, const B: usize>
+    KalmanStorageInternal<C> for NoAllocKalmanStorage<C, M, I, E, L, B>
+{
+    type SteeredClockStorage = ArrayVec<crate::ClockInfo<C>, I>;
+    type StateMutex = RefCell<KalmanControllerState<Self, C>>;
 }
 
-impl<C: Clock<TAI>, const N: usize> KalmanStorage<C> for NoAllocKalmanStorage<C, N> {}
+impl<C: Clock<TAI>, const M: usize, const I: usize, const E: usize, const L: usize, const B: usize>
+    KalmanStorage<C> for NoAllocKalmanStorage<C, M, I, E, L, B>
+{
+}
 
 /// A storage provider for a matrix. Abstracts a dynamically sized array of f64.
 ///
@@ -372,5 +390,43 @@ impl<Storage: KalmanStorageInternal<C>, C: Clock<TAI>> StateMutex<Storage, C>
 
     fn with_mut<R, F: FnOnce(&mut KalmanControllerState<Storage, C>) -> R>(&self, f: F) -> R {
         f(&mut self.borrow_mut())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn independent_capacities_avoid_matrix_sized_metadata() {
+        type Storage = NoAllocKalmanStorage<(), 16, 1, 2, 2, 4>;
+        let matrix = <Storage as KalmanStorageBase>::MatrixStorage::new(16, |i| i as f64);
+        assert_eq!(matrix[15], 15.0);
+        assert_eq!(
+            <Storage as KalmanStorageBase>::InternalClockStorage::new().capacity(),
+            1
+        );
+        assert_eq!(
+            <Storage as KalmanStorageBase>::ExternalClockStorage::new().capacity(),
+            2
+        );
+        assert_eq!(
+            <Storage as KalmanStorageBase>::EstimatorLinkStorage::new().capacity(),
+            2
+        );
+        assert_eq!(
+            <Storage as KalmanStorageBase>::FilterLinkStorage::new().capacity(),
+            2
+        );
+        let bounds: <Storage as KalmanStorageBase>::BoundStorage =
+            (0..4).map(|i| (i as f64, BoundType::Start)).collect();
+        assert_eq!(bounds.len(), 4);
+        assert_eq!(bounds.capacity(), 4);
+        assert!(
+            core::mem::size_of::<<Storage as KalmanStorageBase>::FilterLinkStorage>()
+                < core::mem::size_of::<
+                    <NoAllocKalmanStorage<(), 16> as KalmanStorageBase>::FilterLinkStorage,
+                >()
+        );
     }
 }
